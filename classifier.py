@@ -1,89 +1,22 @@
 """
-classifier.py — Fast, accurate expense category classifier
+classifier.py — Keyword-based expense classifier (cloud deployment)
 
-Architecture (layered, fastest first):
-  1. LRU cache          — identical description → instant repeat lookup
-  2. Keyword fast-path  — regex rules cover ~85% of real-world expenses instantly
-  3. Sentence-Transformers semantic similarity — ~10× faster than zero-shot MNLI
-     Uses all-MiniLM-L6-v2 (22 MB) with pre-computed category embeddings
-  4. Fallback           → "other"
+Architecture:
+  1. LRU cache      — identical description → instant repeat lookup
+  2. Keyword rules  — regex rules cover ~85% of real-world expenses
+  3. Fallback       → "other"
 
-Improvements over v1:
-  - Replaced slow ~268 MB distilbert zero-shot pipeline with ~22 MB MiniLM
-  - Category representations pre-computed once at load time → instant inference
-  - 5-20× faster per classification after warm-up
-  - More nuanced category descriptions capture semantic meaning better
-  - Hindi/Hinglish keyword patterns expanded
+Note: Semantic ML model (sentence-transformers) removed for cloud deployment
+due to bundle size constraints. Keyword path is fast and accurate enough
+for the vast majority of expense descriptions.
 """
 
 import re
-import threading
 import logging
-import numpy as np
 from functools import lru_cache
 
 logger = logging.getLogger(__name__)
 
-# ── Confidence threshold ───────────────────────────────────────────────────────
-CONFIDENCE_THRESHOLD = 0.30   # cosine similarity; lower than zero-shot scores
-
-# ── Category keys and their semantic descriptions ────────────────────────────
-# Multiple descriptions per category → richer embedding space
-CATEGORY_DESCRIPTIONS: dict[str, list[str]] = {
-    "food": [
-        "food dining restaurant cafe meal eating",
-        "grocery supermarket cooking ingredients",
-        "coffee tea drinks beverages juice",
-        "takeaway delivery swiggy zomato food order",
-        "breakfast lunch dinner snack bakery",
-    ],
-    "transport": [
-        "taxi cab ride uber ola auto rickshaw",
-        "fuel petrol diesel gas station refuel",
-        "bus train metro rail commute ticket",
-        "flight airline airport travel booking",
-        "hotel accommodation parking toll highway",
-    ],
-    "entertainment": [
-        "movies cinema theatre ticket show",
-        "netflix spotify streaming gaming subscription",
-        "concert event festival amusement park",
-        "sports game match recreation hobby",
-        "music gaming console digital entertainment",
-    ],
-    "health": [
-        "doctor hospital clinic medical consultation",
-        "pharmacy medicine prescription drugs",
-        "gym fitness yoga workout exercise",
-        "health insurance lab test diagnostic",
-        "dental eye care therapy wellness",
-    ],
-    "shopping": [
-        "clothes fashion clothing apparel shoes",
-        "amazon flipkart online shopping ecommerce",
-        "electronics mobile laptop gadget appliance",
-        "furniture home decor household items",
-        "cosmetics beauty skincare accessories gift",
-    ],
-    "utilities": [
-        "electricity water gas bill utility payment",
-        "internet broadband wifi mobile recharge phone bill",
-        "rent house apartment maintenance charges",
-        "insurance premium loan emi bank charge",
-        "tax government fee subscription annual charge",
-    ],
-    "education": [
-        "school college university tuition fees",
-        "online course udemy coursera learning",
-        "books textbook stationery study material",
-        "exam coaching workshop seminar training",
-        "software license professional development",
-    ],
-    "other": [
-        "miscellaneous unknown general expense",
-        "other uncategorized random payment",
-    ],
-}
 
 # ── Keyword fast-path rules ───────────────────────────────────────────────────
 def _build_keyword_rules():
@@ -172,41 +105,35 @@ def _build_keyword_rules():
          r"linkedin\s*learning|edx|school|college|university|exam\s*fee|"
          r"textbook|book|kindle|e-?book|software\s*license|adobe|notion|"
          r"microsoft\s*365|google\s*workspace|canva|figma|research|"
-         r"byju|byjus|unacademy|vedantu|khan\s*academy|toppr|doubtnut|"
-         r"neet|jee|upsc|cat\s*exam|gre|gmat|ielts|toefl|sat\b|"
-         r"coaching|tutor|private\s*tution|tution|fees|admission|"
-         r"stationery|pencil|notebook|pen|eraser|compass|geometry|"
-         r"coding\s*bootcamp|programming\s*course|data\s*science\s*course",
+         r"byju|unacademy|vedantu|toppr|meritnation|"
+         r"coaching|tutoring|iit|jee|neet|upsc|cat\s*exam|"
+         r"pen|pencil|notebook|stationery|school\s*supplies",
          "education"),
     ]
-    return [(re.compile(p, re.IGNORECASE), k) for p, k in rules_raw]
+    return [
+        (re.compile(pattern, re.IGNORECASE), category)
+        for pattern, category in rules_raw
+    ]
+
 
 _KEYWORD_RULES = _build_keyword_rules()
 
-
-def _keyword_classify(description: str) -> str | None:
-    for pattern, key in _KEYWORD_RULES:
-        if pattern.search(description):
-            return key
-    return None
-
-
-# ── Text normalisation ─────────────────────────────────────────────────────────
-_CLEAN_RE = re.compile(r"[^a-zA-Z0-9 \-&/]+")
+_CLEAN_RE = re.compile(r"[^a-z0-9\s]")
 _SPACE_RE = re.compile(r"\s+")
+
 _ABBREV_MAP = [
-    (re.compile(r"\btpt\b",  re.I), "transport"),
-    (re.compile(r"\btrpt\b", re.I), "transport"),
-    (re.compile(r"\bdr\.\s*", re.I), "doctor "),
-    (re.compile(r"\bmed\b",  re.I), "medicine"),
-    (re.compile(r"\bele\s*bill\b", re.I), "electricity bill"),
+    (re.compile(r"\bswgy\b",  re.I), "swiggy"),
+    (re.compile(r"\bzmt\b",   re.I), "zomato"),
+    (re.compile(r"\bbms\b",   re.I), "bookmyshow"),
+    (re.compile(r"\bmmt\b",   re.I), "makemytrip"),
     (re.compile(r"\bmob\s*bill\b", re.I), "mobile bill"),
     (re.compile(r"\bnet\s*bill\b", re.I), "internet bill"),
-    (re.compile(r"\bpg\b",   re.I), "paying guest rent"),
-    (re.compile(r"\blpg\b",  re.I), "gas cylinder"),
-    (re.compile(r"\bmt\b",   re.I), "metro"),
-    (re.compile(r"\botc\b",  re.I), "pharmacy medicine"),
+    (re.compile(r"\bpg\b",    re.I), "paying guest rent"),
+    (re.compile(r"\blpg\b",   re.I), "gas cylinder"),
+    (re.compile(r"\bmt\b",    re.I), "metro"),
+    (re.compile(r"\botc\b",   re.I), "pharmacy medicine"),
 ]
+
 
 def _normalise(description: str) -> str:
     text = description.lower()
@@ -216,161 +143,41 @@ def _normalise(description: str) -> str:
     return _SPACE_RE.sub(" ", text).strip()
 
 
-# ── Sentence-Transformer singleton ────────────────────────────────────────────
-_model = None
-_category_embeddings: dict[str, np.ndarray] = {}  # category → mean embedding
-_lock = threading.Lock()
-
-
-def _load_model():
-    global _model, _category_embeddings
-    if _model is not None:
-        return _model
-    with _lock:
-        if _model is not None:
-            return _model
-        try:
-            from sentence_transformers import SentenceTransformer
-            logger.info("Loading sentence-transformer (all-MiniLM-L6-v2, ~22 MB)…")
-            _model = SentenceTransformer("all-MiniLM-L6-v2")
-            # Pre-compute category embeddings (done once)
-            logger.info("Pre-computing category embeddings…")
-            for cat, descs in CATEGORY_DESCRIPTIONS.items():
-                embs = _model.encode(descs, convert_to_numpy=True, normalize_embeddings=True)
-                _category_embeddings[cat] = embs.mean(axis=0)
-                # Re-normalize the mean vector
-                norm = np.linalg.norm(_category_embeddings[cat])
-                if norm > 0:
-                    _category_embeddings[cat] /= norm
-            logger.info(f"Classifier ready. {len(_category_embeddings)} categories embedded.")
-        except Exception as exc:
-            logger.error(f"Failed to load sentence-transformer: {exc}")
-            _model = None
-    return _model
-
-
-def _semantic_classify(description: str) -> dict:
-    """Cosine-similarity classification. ~5-15ms per call vs ~150ms for zero-shot."""
-    model = _load_model()
-    if model is None or not _category_embeddings:
-        return {"category": "other", "confidence": 0.0}
-    try:
-        query_emb = model.encode(description, convert_to_numpy=True, normalize_embeddings=True)
-        # Cosine similarity = dot product of normalized vectors
-        scores = {
-            cat: float(np.dot(query_emb, emb))
-            for cat, emb in _category_embeddings.items()
-        }
-        best_cat = max(scores, key=scores.get)
-        best_score = scores[best_cat]
-        # Exclude 'other' from winning unless all scores are low
-        non_other = {k: v for k, v in scores.items() if k != "other"}
-        if non_other:
-            top_non_other_cat = max(non_other, key=non_other.get)
-            top_non_other_score = non_other[top_non_other_cat]
-            if top_non_other_score >= CONFIDENCE_THRESHOLD:
-                best_cat = top_non_other_cat
-                best_score = top_non_other_score
-        return {"category": best_cat, "confidence": round(best_score, 4)}
-    except Exception as exc:
-        logger.warning(f"Semantic classification error for '{description}': {exc}")
-        return {"category": "other", "confidence": 0.0}
+def _keyword_classify(normalised: str):
+    for pattern, category in _KEYWORD_RULES:
+        if pattern.search(normalised):
+            return category
+    return None
 
 
 # ── LRU-cached core ───────────────────────────────────────────────────────────
 @lru_cache(maxsize=4096)
 def _cached_classify(normalised: str) -> dict:
-    """
-    Classification pipeline:
-      1. Keyword fast-path  → confidence 1.0 (covers ~85% of cases)
-      2. Semantic DL model  → cosine similarity (fast, ~22 MB model)
-      3. Fallback           → "other"
-    """
     kw = _keyword_classify(normalised)
     if kw is not None:
-        logger.debug(f"Keyword → '{kw}' for: {normalised!r}")
         return {"category": kw, "confidence": 1.0, "method": "keyword"}
-
-    result = _semantic_classify(normalised)
-    result["method"] = "semantic" if result["confidence"] >= CONFIDENCE_THRESHOLD else "fallback"
-    if result["confidence"] < CONFIDENCE_THRESHOLD:
-        logger.debug(f"Low confidence ({result['confidence']:.3f}) for: {normalised!r} → 'other'")
-        result["category"] = "other"
-    return result
+    return {"category": "other", "confidence": 0.0, "method": "fallback"}
 
 
-# ── Public API ─────────────────────────────────────────────────────────────────
+# ── Public API ────────────────────────────────────────────────────────────────
 def classify_expense(description: str) -> dict:
-    """
-    Classify a single expense description.
-    Returns: {"category": str, "confidence": float, "method": str}
-    """
     if not description or not description.strip():
         return {"category": "other", "confidence": 0.0, "method": "empty"}
     return _cached_classify(_normalise(description))
 
 
 def classify_batch(descriptions: list[str]) -> list[dict]:
-    """
-    Classify a list of expenses efficiently.
-    For large batches, encodes all non-keyword items in a single model call (batched inference).
-    """
-    results = []
-    pending_indices = []
-    pending_texts = []
-
-    for i, desc in enumerate(descriptions):
-        if not desc or not desc.strip():
-            results.append({"category": "other", "confidence": 0.0, "method": "empty"})
-            continue
-        normalised = _normalise(desc)
-        kw = _keyword_classify(normalised)
-        if kw is not None:
-            results.append({"category": kw, "confidence": 1.0, "method": "keyword"})
-        else:
-            results.append(None)  # placeholder
-            pending_indices.append(i)
-            pending_texts.append(normalised)
-
-    # Batch encode all non-keyword items at once (much faster than one-by-one)
-    if pending_texts:
-        model = _load_model()
-        if model and _category_embeddings:
-            try:
-                from sentence_transformers import SentenceTransformer
-                embs = model.encode(pending_texts, convert_to_numpy=True, normalize_embeddings=True, batch_size=64)
-                for idx, (i, emb) in enumerate(zip(pending_indices, embs)):
-                    scores = {cat: float(np.dot(emb, cemb)) for cat, cemb in _category_embeddings.items()}
-                    non_other = {k: v for k, v in scores.items() if k != "other"}
-                    best_cat = max(non_other, key=non_other.get) if non_other else "other"
-                    best_score = non_other.get(best_cat, 0.0)
-                    if best_score < CONFIDENCE_THRESHOLD:
-                        best_cat = "other"
-                    results[i] = {"category": best_cat, "confidence": round(best_score, 4), "method": "semantic_batch"}
-            except Exception as e:
-                logger.warning(f"Batch encode failed: {e}")
-
-        for i in pending_indices:
-            if results[i] is None:
-                results[i] = {"category": "other", "confidence": 0.0, "method": "fallback"}
-
-    return results
+    return [classify_expense(d) for d in descriptions]
 
 
-# ── Warm-up ────────────────────────────────────────────────────────────────────
 def warm_up():
-    """Pre-load and warm up the model in a background thread."""
-    def _run():
-        _load_model()
-        classify_expense("coffee at the cafe")
-        classify_expense("ola ride to office")
-        classify_expense("random unknown thing xyz")
-        logger.info("Classifier warm-up complete.")
-    threading.Thread(target=_run, daemon=True).start()
+    """No-op in cloud deployment."""
+    pass
 
 
 def cache_info():
     return _cached_classify.cache_info()
+
 
 def cache_clear():
     _cached_classify.cache_clear()

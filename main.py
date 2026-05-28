@@ -13,6 +13,7 @@ from typing import List
 import models, schemas
 from database import engine, SessionLocal
 from classifier import classify_expense, warm_up
+import uvicorn
 
 
 # ── Auto-migrate ───────────────────────────────────────────────────────────────
@@ -516,3 +517,8 @@ def serve_spa(full_path: str):
     if index.exists():
         return FileResponse(str(index))
     return {"message": "React build not found. Run: cd vault-frontend && npm install && npm run build"}
+
+
+if __name__ == "__main__":
+    import uvicorn
+    uvicorn.run("main:app", host="0.0.0.0", port=8000, reload=True)

@@ -58,7 +58,7 @@ GROQ_API_KEY  = os.environ.get("GROQ_API_KEY", "")
 GROQ_MODEL    = os.environ.get("GROQ_MODEL", "llama-3.3-70b-versatile")
 GROQ_CHAT_URL = "https://api.groq.com/openai/v1/chat/completions"
 
-DIST_DIR = Path("dist")
+DIST_DIR = Path("vault-frontend/dist")
 
 
 def get_db():

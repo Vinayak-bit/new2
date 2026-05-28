@@ -3,10 +3,10 @@ from sqlalchemy.ext.declarative import declarative_base
 from sqlalchemy.orm import sessionmaker
 import os
 
-DATABASE_URL = os.environ.get("DATABASE_URL")
-
-if not DATABASE_URL:
-    raise RuntimeError("DATABASE_URL environment variable is not set!")
+DATABASE_URL = os.environ.get(
+    "DATABASE_URL",
+    "postgresql://postgres:1971@localhost:5432/User"
+)
 
 engine = create_engine(DATABASE_URL)
 SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)

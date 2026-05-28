@@ -1,7 +1,7 @@
 {
     "build": {
         "builder": "NIXPACKS",
-        "buildCommand": "cd vault-frontend && npm install && npm run build"
+        "buildCommand": "cd vault-frontend && npm install && npm run build && cp -r dist ../"
     },
     "deploy": {
         "startCommand": "uvicorn main:app --host 0.0.0.0 --port $PORT"
